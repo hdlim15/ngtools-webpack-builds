@@ -14,13 +14,19 @@ const ast_helpers_1 = require("./ast_helpers");
 const insert_import_1 = require("./insert_import");
 const interfaces_1 = require("./interfaces");
 const make_transform_1 = require("./make_transform");
-function replaceServerBootstrap(shouldTransform, getEntryModule, getTypeChecker) {
+function replaceServerBootstrap(shouldTransform, getEntryModules, getTypeChecker) {
     const standardTransform = function (sourceFile) {
         const ops = [];
-        const entryModule = getEntryModule();
-        if (!shouldTransform(sourceFile.fileName) || !entryModule) {
+        const entryModules = getEntryModules();
+        if (!shouldTransform(sourceFile.fileName) || !entryModules) {
             return ops;
         }
+        return entryModules.reduce((ops, entryModule) => {
+            return ops.concat(standardTransformHelper(sourceFile, entryModule));
+        }, ops);
+    };
+    const standardTransformHelper = function (sourceFile, entryModule) {
+        const ops = [];
         // Find all identifiers.
         const entryModuleIdentifiers = ast_helpers_1.collectDeepNodes(sourceFile, ts.SyntaxKind.Identifier)
             .filter(identifier => identifier.text === entryModule.className);

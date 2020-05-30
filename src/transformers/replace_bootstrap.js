@@ -14,10 +14,19 @@ const ast_helpers_1 = require("./ast_helpers");
 const insert_import_1 = require("./insert_import");
 const interfaces_1 = require("./interfaces");
 const make_transform_1 = require("./make_transform");
-function replaceBootstrap(shouldTransform, getEntryModule, getTypeChecker, useFactories = true) {
+function replaceBootstrap(shouldTransform, getEntryModules, getTypeChecker, useFactories = true) {
     const standardTransform = function (sourceFile) {
         const ops = [];
-        const entryModule = getEntryModule();
+        const entryModules = getEntryModules();
+        if (!shouldTransform(sourceFile.fileName) || !entryModules) {
+            return ops;
+        }
+        return entryModules.reduce((ops, entryModule) => {
+            return ops.concat(standardTransformHelper(sourceFile, entryModule));
+        }, ops);
+    };
+    const standardTransformHelper = function (sourceFile, entryModule) {
+        const ops = [];
         if (!shouldTransform(sourceFile.fileName) || !entryModule) {
             return ops;
         }

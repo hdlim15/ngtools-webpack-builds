@@ -14,6 +14,7 @@ export declare class AngularCompilerPlugin {
     private _lazyRoutes;
     private _tsConfigPath;
     private _entryModule;
+    private _entryModules;
     private _mainPath;
     private _basePath;
     private _transformers;
@@ -40,10 +41,10 @@ export declare class AngularCompilerPlugin {
     constructor(options: AngularCompilerPluginOptions);
     get options(): AngularCompilerPluginOptions;
     get done(): Promise<void> | null;
-    get entryModule(): {
+    get entryModules(): {
         path: string;
         className: string;
-    } | null;
+    }[] | null;
     get typeChecker(): ts.TypeChecker | null;
     /** @deprecated  From 8.0.2 */
     static isSupported(): boolean;
