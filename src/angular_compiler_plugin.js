@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.AngularCompilerPlugin = void 0;
 /**
  * @license
  * Copyright Google Inc. All Rights Reserved.
@@ -73,10 +74,6 @@ class AngularCompilerPlugin {
     get typeChecker() {
         const tsProgram = this._getTsProgram();
         return tsProgram ? tsProgram.getTypeChecker() : null;
-    }
-    /** @deprecated  From 8.0.2 */
-    static isSupported() {
-        return compiler_cli_1.VERSION && parseInt(compiler_cli_1.VERSION.major) >= 8;
     }
     _setupOptions(options) {
         benchmark_1.time('AngularCompilerPlugin._setupOptions');
@@ -395,11 +392,7 @@ class AngularCompilerPlugin {
         });
     }
     _createForkedTypeChecker() {
-        // Bootstrap type checker is using local CLI.
-        const g = typeof global !== 'undefined' ? global : {}; // tslint:disable-line:no-any
-        const typeCheckerFile = g['_DevKitIsLocal']
-            ? './type_checker_bootstrap.js'
-            : './type_checker_worker.js';
+        const typeCheckerFile = './type_checker_worker.js';
         const debugArgRegex = /--inspect(?:-brk|-port)?|--debug(?:-brk|-port)/;
         const execArgv = process.execArgv.filter((arg) => {
             // Remove debug args.
@@ -474,8 +467,8 @@ class AngularCompilerPlugin {
         // Exclude the following files from unused checks
         // - ngfactories & ngstyle might not have a correspondent
         //   JS file example `@angular/core/core.ngfactory.ts`.
-        // - __ng_typecheck__.ts will never be requested.
-        const fileExcludeRegExp = /(\.(ngfactory|ngstyle|ngsummary)\.ts|ng_typecheck__\.ts)$/;
+        // - ngtypecheck.ts and __ng_typecheck__.ts are used for type-checking in Ivy.
+        const fileExcludeRegExp = /(\.(ngfactory|ngstyle|ngsummary|ngtypecheck)\.ts|ng_typecheck__\.ts)$/;
         // Start all the source file names we care about.
         // Ignore matches to the regexp above, files we've already reported once before, and
         // node_modules.
