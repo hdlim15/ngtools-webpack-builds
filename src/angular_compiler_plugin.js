@@ -11,6 +11,7 @@ exports.AngularCompilerPlugin = void 0;
 const core_1 = require("@angular-devkit/core");
 const node_1 = require("@angular-devkit/core/node");
 const compiler_cli_1 = require("@angular/compiler-cli");
+const tooling_1 = require("@angular/compiler-cli/src/tooling");
 const child_process_1 = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -26,7 +27,6 @@ const paths_plugin_1 = require("./paths-plugin");
 const resource_loader_1 = require("./resource_loader");
 const transformers_1 = require("./transformers");
 const ast_helpers_1 = require("./transformers/ast_helpers");
-const ctor_parameters_1 = require("./transformers/ctor-parameters");
 const remove_ivy_jit_support_calls_1 = require("./transformers/remove-ivy-jit-support-calls");
 const type_checker_1 = require("./type_checker");
 const type_checker_messages_1 = require("./type_checker_messages");
@@ -39,6 +39,8 @@ class AngularCompilerPlugin {
         this._useFactories = false;
         // Contains `moduleImportPath#exportName` => `fullModulePath`.
         this._lazyRoutes = {};
+        this._entryModule = null;
+        this._entryModules = null;
         this._transformers = [];
         this._platformTransformers = null;
         this._JitMode = false;
@@ -49,25 +51,31 @@ class AngularCompilerPlugin {
         this._nodeModulesRegExp = /[\\\/]node_modules[\\\/]/;
         // Webpack plugin.
         this._firstRun = true;
+        this._donePromise = null;
+        this._normalizedLocale = null;
         this._warnings = [];
         this._errors = [];
         // TypeChecker process.
         this._forkTypeChecker = true;
+        this._typeCheckerProcess = null;
         this._forkedTypeCheckerInitialized = false;
         this._mainFields = [];
         this._options = Object.assign({}, options);
+        this._logger = options.logger || node_1.createConsoleLogger();
         this._setupOptions(this._options);
     }
     get options() { return this._options; }
     get done() { return this._donePromise; }
-    get entryModule() {
-        if (!this._entryModule) {
+    get entryModules() {
+        if (!this._entryModules) {
             return null;
         }
-        const splitted = this._entryModule.split(/(#[a-zA-Z_]([\w]+))$/);
-        const path = splitted[0];
-        const className = !!splitted[1] ? splitted[1].substring(1) : 'default';
-        return { path, className };
+        return this._entryModules.map((entryModule) => {
+            const splitted = entryModule.split(/(#[a-zA-Z_]([\w]+))$/);
+            const path = splitted[0];
+            const className = !!splitted[1] ? splitted[1].substring(1) : 'default';
+            return { path, className };
+        });
     }
     get typeChecker() {
         const tsProgram = this._getTsProgram();
@@ -75,7 +83,6 @@ class AngularCompilerPlugin {
     }
     _setupOptions(options) {
         benchmark_1.time('AngularCompilerPlugin._setupOptions');
-        this._logger = options.logger || node_1.createConsoleLogger();
         // Fill in the missing options.
         if (!options.hasOwnProperty('tsConfigPath')) {
             throw new Error('Must specify "tsConfigPath" in the configuration of @ngtools/webpack.');
@@ -153,6 +160,10 @@ class AngularCompilerPlugin {
             this._compilerOptions.i18nInMissingTranslations =
                 options.missingTranslation;
         }
+        // For performance, disable AOT decorator downleveling transformer for applications in the CLI.
+        // The transformer is not needed for VE or Ivy in this plugin since Angular decorators are removed.
+        // While the transformer would make no changes, it would still need to walk each source file AST.
+        this._compilerOptions.annotationsAs = 'decorators';
         // Process forked type checker options.
         if (options.forkTypeChecker !== undefined) {
             this._forkTypeChecker = options.forkTypeChecker;
@@ -172,6 +183,9 @@ class AngularCompilerPlugin {
             this._warnings.push(new Error(`Lazy route discovery is disabled but additional Lazy Module Resources were`
                 + ` provided. These will be ignored.`));
         }
+        if (this._compilerOptions.strictMetadataEmit) {
+            this._warnings.push(new Error(`Using Angular compiler option 'strictMetadataEmit' for applications might cause undefined behavior.`));
+        }
         if (this._discoverLazyRoutes === false && this.options.additionalLazyModules
             && Object.keys(this.options.additionalLazyModules).length > 0) {
             this._warnings.push(new Error(`Lazy route discovery is disabled but additional lazy modules were provided.`
@@ -189,13 +203,13 @@ class AngularCompilerPlugin {
         // in the compilation. In that case, we can pass the right one as an option to the plugin.
         this._contextElementDependencyConstructor = options.contextElementDependencyConstructor
             || require('webpack/lib/dependencies/ContextElementDependency');
-        // Use entryModule if available in options, otherwise resolve it from mainPath after program
+        // Use entryModules if available in options, otherwise resolve it from mainPath after program
         // creation.
-        if (this._options.entryModule) {
-            this._entryModule = this._options.entryModule;
+        if (this._options.entryModules) {
+            this._entryModules = this._options.entryModules || [this._options.entryModule];
         }
         else if (this._compilerOptions.entryModule) {
-            this._entryModule = path.resolve(this._basePath, this._compilerOptions.entryModule); // temporary cast for type issue
+            this._entryModules = [path.resolve(this._basePath, this._compilerOptions.entryModule)]; // temporary cast for type issue
         }
         // Set platform.
         this._platform = options.platform || interfaces_1.PLATFORM.Browser;
@@ -293,7 +307,7 @@ class AngularCompilerPlugin {
         if (!this._entryModule && this._mainPath) {
             benchmark_1.time('AngularCompilerPlugin._make.resolveEntryModuleFromMain');
             this._entryModule = entry_resolver_1.resolveEntryModuleFromMain(this._mainPath, this._compilerHost, this._getTsProgram());
-            if (this._discoverLazyRoutes && !this.entryModule && !this._compilerOptions.enableIvy) {
+            if (this._discoverLazyRoutes && !this.entryModules && !this._compilerOptions.enableIvy) {
                 this._warnings.push('Lazy routes discovery is not enabled. '
                     + 'Because there is neither an entryModule nor a '
                     + 'statically analyzable bootstrap code in the main file.');
@@ -318,7 +332,7 @@ class AngularCompilerPlugin {
         let entryRoute;
         let ngProgram;
         if (this._JitMode) {
-            if (!this.entryModule) {
+            if (!this.entryModules) {
                 return {};
             }
             benchmark_1.time('AngularCompilerPlugin._listLazyRoutesFromProgram.createProgram');
@@ -328,7 +342,8 @@ class AngularCompilerPlugin {
                 host: this._compilerHost,
             });
             benchmark_1.timeEnd('AngularCompilerPlugin._listLazyRoutesFromProgram.createProgram');
-            entryRoute = utils_1.workaroundResolve(this.entryModule.path) + '#' + this.entryModule.className;
+            const entryModule = this.entryModules[0];
+            entryRoute = utils_1.workaroundResolve(entryModule.path) + '#' + entryModule.className;
         }
         else {
             ngProgram = this._program;
@@ -542,7 +557,7 @@ class AngularCompilerPlugin {
         compiler.hooks.environment.tap('angular-compiler', () => {
             // The webpack types currently do not include these
             const compilerWithFileSystems = compiler;
-            let host = this._options.host || new webpack_input_host_1.WebpackInputHost(compilerWithFileSystems.inputFileSystem);
+            let host = this._options.host || webpack_input_host_1.createWebpackInputHost(compilerWithFileSystems.inputFileSystem);
             let replacements;
             if (this._options.hostReplacementPaths) {
                 if (typeof this._options.hostReplacementPaths == 'function') {
@@ -568,7 +583,14 @@ class AngularCompilerPlugin {
             }
             let ngccProcessor;
             if (this._compilerOptions.enableIvy) {
-                ngccProcessor = new ngcc_processor_1.NgccProcessor(this._mainFields, compilerWithFileSystems.inputFileSystem, this._warnings, this._errors, this._basePath, this._compilerOptions, this._tsConfigPath);
+                const fileWatchPurger = (path) => {
+                    // tslint:disable-next-line: no-any
+                    if (compilerWithFileSystems.inputFileSystem.purge) {
+                        // tslint:disable-next-line: no-any
+                        compilerWithFileSystems.inputFileSystem.purge(path);
+                    }
+                };
+                ngccProcessor = new ngcc_processor_1.NgccProcessor(this._mainFields, fileWatchPurger, this._warnings, this._errors, this._basePath, this._tsConfigPath);
                 ngccProcessor.process();
             }
             // Use an identity function as all our paths are absolute already.
@@ -757,9 +779,12 @@ class AngularCompilerPlugin {
     _makeTransformers() {
         const isAppPath = (fileName) => !fileName.endsWith('.ngfactory.ts') && !fileName.endsWith('.ngstyle.ts');
         const isMainPath = (fileName) => fileName === (this._mainPath ? utils_1.workaroundResolve(this._mainPath) : this._mainPath);
-        const getEntryModule = () => this.entryModule
-            ? { path: utils_1.workaroundResolve(this.entryModule.path), className: this.entryModule.className }
-            : this.entryModule;
+        // TODO: fix fn usage
+        const getEntryModules = () => this.entryModules
+            ? this.entryModules.map((entryModule) => {
+                return { path: utils_1.workaroundResolve(entryModule.path), className: entryModule.className };
+            })
+            : this.entryModules;
         const getLazyRoutes = () => this._lazyRoutes;
         const getTypeChecker = () => this._getTsProgram().getTypeChecker();
         if (this._JitMode) {
@@ -767,7 +792,12 @@ class AngularCompilerPlugin {
             this._transformers.push(transformers_1.replaceResources(isAppPath, getTypeChecker, this._options.directTemplateLoading));
             // Downlevel constructor parameters for DI support
             // This is required to support forwardRef in ES2015 due to TDZ issues
-            this._transformers.push(ctor_parameters_1.downlevelConstructorParameters(getTypeChecker));
+            // This wrapper is needed here due to the program not being available until after the transformers are created.
+            const downlevelFactory = (context) => {
+                const factory = tooling_1.constructorParametersDownlevelTransform(this._getTsProgram());
+                return factory(context);
+            };
+            this._transformers.push(downlevelFactory);
         }
         else {
             if (!this._compilerOptions.enableIvy) {
@@ -798,11 +828,11 @@ class AngularCompilerPlugin {
                 // This transform must go before replaceBootstrap because it looks for the entry module
                 // import, which will be replaced.
                 if (this._normalizedLocale) {
-                    this._transformers.push(transformers_1.registerLocaleData(isAppPath, getEntryModule, this._normalizedLocale));
+                    this._transformers.push(transformers_1.registerLocaleData(isAppPath, getEntryModules, this._normalizedLocale));
                 }
                 if (!this._JitMode) {
                     // Replace bootstrap in browser non JIT Mode.
-                    this._transformers.push(transformers_1.replaceBootstrap(isAppPath, getEntryModule, getTypeChecker, this._useFactories));
+                    this._transformers.push(transformers_1.replaceBootstrap(isAppPath, getEntryModules, getTypeChecker, this._useFactories));
                 }
             }
             else if (this._platform === interfaces_1.PLATFORM.Server) {
@@ -812,7 +842,7 @@ class AngularCompilerPlugin {
                     this._transformers.push(transformers_1.exportLazyModuleMap(isMainPath, getLazyRoutes));
                 }
                 if (this._useFactories) {
-                    this._transformers.push(transformers_1.exportNgFactory(isMainPath, getEntryModule), transformers_1.replaceServerBootstrap(isMainPath, getEntryModule, getTypeChecker));
+                    this._transformers.push(transformers_1.exportNgFactory(isMainPath, getEntryModules), transformers_1.replaceServerBootstrap(isMainPath, getEntryModules, getTypeChecker));
                 }
             }
         }
@@ -860,7 +890,7 @@ class AngularCompilerPlugin {
         const { emitResult, diagnostics } = this._emit();
         benchmark_1.timeEnd('AngularCompilerPlugin._update._emit');
         // Report any diagnostics.
-        diagnostics_1.reportDiagnostics(diagnostics, this._compilerHost, msg => this._errors.push(new Error(msg)), msg => this._warnings.push(msg));
+        diagnostics_1.reportDiagnostics(diagnostics, msg => this._errors.push(new Error(msg)), msg => this._warnings.push(msg));
         this._emitSkipped = !emitResult || emitResult.emitSkipped;
         // Reset changed files on successful compilation.
         if (!this._emitSkipped && this._errors.length === 0) {

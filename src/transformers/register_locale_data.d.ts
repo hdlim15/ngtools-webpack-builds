@@ -6,7 +6,7 @@
  * found in the LICENSE file at https://angular.io/license
  */
 import * as ts from 'typescript';
-export declare function registerLocaleData(shouldTransform: (fileName: string) => boolean, getEntryModule: () => {
+export declare function registerLocaleData(shouldTransform: (fileName: string) => boolean, getEntryModules: () => {
     path: string;
     className: string;
-} | null, locale: string): ts.TransformerFactory<ts.SourceFile>;
+}[] | null, locale: string): ts.TransformerFactory<ts.SourceFile>;
